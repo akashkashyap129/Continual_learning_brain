@@ -1,0 +1,27 @@
+# continual_learning_brain — requirements.txt
+# Install with: pip install -r requirements.txt
+
+# Core ML
+numpy==2.2.6
+pandas==2.3.3
+scikit-learn==1.7.2
+torch==2.11.0+cpu
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+# Embeddings
+sentence-transformers==4.1.0
+
+# Dimensionality reduction & clustering
+umap-learn==0.5.11
+
+# Visualization
+matplotlib==3.10.8
+plotly==6.1.2
+
+# Notebooks
+jupyterlab==4.4.2
+ipykernel==6.29.5
+
+# API (Phase 4)
+fastapi==0.135.2
+uvicorn==0.35.0
