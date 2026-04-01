@@ -1,16 +1,16 @@
-# data/generate_synthetic_users.py
-# Generates synthetic users with smoothly drifting interest timelines.
-# Output: data/raw/synthetic_users.json
+                                                                                                                                            # data/generate_synthetic_users.py
+                                                                                                                                                                            # Generates synthetic users with smoothly drifting interest timelines.
+                                                                                                                                                                            # Output: data/raw/synthetic_users.json
 
 import json
 import random
 import numpy as np
 from pathlib import Path
 
-# ── output path ───────────────────────────────────────────────────────────────
+# ── output path 
 OUTPUT_PATH = Path("data/raw/synthetic_users.json")
 
-# ── topic graph ───────────────────────────────────────────────────────────────
+# ── topic graph 
 # Each persona has one or more progression paths.
 # Topics overlap between adjacent steps to create smooth drift.
 TOPIC_GRAPH = {
