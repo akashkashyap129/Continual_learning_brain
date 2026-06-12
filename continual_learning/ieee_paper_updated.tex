@@ -1,0 +1,973 @@
+% =============================================================
+%  IEEE Conference Paper
+%  Title : Continual Learning-Based User Embedding System
+%          for Evolving Interest Representation
+%  Style : IEEEtran (conference)
+%  Notes : References forced to a fresh page in single-column.
+%          Compile twice with pdflatex to resolve cross-refs.
+% =============================================================
+
+\documentclass[conference]{IEEEtran}
+
+% ----- packages ----------------------------------------------
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{url}
+\usepackage{cite}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{float}
+\usepackage{microtype}
+\usepackage[hidelinks]{hyperref}
+
+% ----- notation shortcuts ------------------------------------
+\newcommand{\eb}{\mathbf{e}}
+\newcommand{\lam}{\lambda}
+\newcommand{\alph}{\alpha}
+\newcommand{\Fc}{\mathcal{F}}
+
+% ----- minor spacing tweak -----------------------------------
+\setlength{\parskip}{1.5pt}
+
+% =============================================================
+\begin{document}
+
+% ----- title block -------------------------------------------
+\title{%
+  Continual Learning-Based User Embedding System\\[3pt]
+  for Evolving Interest Representation%
+}
+
+\maketitle
+\thispagestyle{empty}
+\pagestyle{plain}
+
+% =============================================================
+%  ABSTRACT
+% =============================================================
+\begin{abstract}
+
+Most recommender systems look at a user's profile as something
+pretty static --- a vector that gets calculated once and only
+updated when there is enough new data to bother retraining.
+That is fine for users whose interests do not shift much, but
+as soon as someone's tastes start changing, this approach
+seriously falls apart. A learner who starts with Python basics,
+moves into machine learning, and then dives deep into
+transformer architectures is practically a different person
+at each stage. If a system keeps referencing their early
+interests months later, it is bound to recommend things they
+no longer care about.
+
+This paper digs into that problem with a four-layer pipeline.
+The first layer builds a controlled dataset of 50 users
+distributed across five technical domains, each following a
+topic timeline that drifts gradually from beginner to advanced
+material. The second layer converts those timelines into
+384-dimensional semantic vectors using a pre-trained sentence
+transformer --- no domain-specific fine-tuning required.
+The third layer tests three different update strategies in
+sequence --- a plain overwrite, Elastic Weight Consolidation
+(EWC), and experience replay --- and measures how much of each
+user's original representation survives after four update
+steps. The fourth layer places the entire user population into
+a shared two-dimensional space for trajectory analysis and
+nearest-neighbour retrieval.
+
+On the baseline evaluation, same-domain users showed an
+average cosine similarity of $0.733$ compared to $0.221$
+across domains --- a $3.32\times$ separation achieved with
+no supervision whatsoever. Under plain overwriting, users
+drifted a mean of $0.853$ from their initial state by the
+final timestep, establishing a concrete forgetting baseline
+that EWC and replay will be measured against in Phase~2.
+
+\end{abstract}
+
+\begin{IEEEkeywords}
+continual learning,
+user embeddings,
+catastrophic forgetting,
+representation learning,
+sentence transformers,
+elastic weight consolidation,
+experience replay,
+UMAP
+\end{IEEEkeywords}
+
+% =============================================================
+%  I. INTRODUCTION
+% =============================================================
+\section{Introduction}
+
+\IEEEPARstart{P}{icture} a student who starts the year
+learning Python, drifts into machine learning, and by
+year's end is knee-deep in transformer models. Their
+interests are sharp and genuine at every point, but those
+interests keep changing. If a system only remembers where
+they began, it will keep pushing beginner material well
+after they have moved on. And if it loses sight of their
+starting point completely, it risks forgetting the key
+foundations that still shape the way they think. Handling
+this smoothly is not as easy as it sounds.
+
+The standard engineering answer is periodic retraining:
+gather the newest interaction data, rebuild the user model
+on a schedule, and hope the update cadence stays fast
+enough to remain relevant. That works well enough when
+users are stable and compute is cheap. It breaks down in
+two common situations. The first is when a user's interests
+shift faster than the retraining cycle can keep up. The
+second is when retraining on a long history ends up
+dominated by recent behaviour, quietly overwriting
+everything the user cared about a year ago.
+
+Continual learning tackles the underlying problem head-on.
+Rather than rebuilding from scratch, it asks how a learned
+representation can be updated incrementally without
+destroying what was already there. The core difficulty is
+catastrophic forgetting~\cite{mccloskey1989} --- the
+empirically well-established tendency of neural models to
+overwrite earlier configurations when trained on new data,
+even when that new data is closely related to the old.
+
+Here, each user's embedding is treated as a small model in
+its own right, and we study what happens as it is updated
+sequentially across four timesteps. Three strategies are
+evaluated: a naive overwrite serving as the worst-case
+control, EWC~\cite{kirkpatrick2017} which uses per-dimension
+importance weights to slow down changes to the most
+significant parts of the old embedding, and experience
+replay~\cite{rolnick2019} which keeps a short memory of
+recent states and blends them into each update. Running all
+three on the same synthetic dataset makes the
+stability-plasticity trade-off visible in a way that is
+concrete and directly measurable.
+
+\smallskip
+\noindent The specific contributions are:
+
+\begin{itemize}
+  \setlength\itemsep{2pt}
+
+  \item A synthetic user data generator with configurable
+        drift speed and cross-domain noise, producing
+        reproducible topic timelines that mimic realistic
+        learning progressions.
+
+  \item A semantic embedding pipeline built on a frozen
+        sentence transformer, including a snapshot mechanism
+        that preserves each user's initial state as an
+        immutable forgetting reference.
+
+  \item Three continual learning update strategies
+        implemented under a single consistent forgetting
+        metric, enabling direct numerical comparison between
+        them.
+
+  \item A social embedding space layer supporting trajectory
+        visualisation, pairwise similarity retrieval, and
+        next-topic prediction by neighbour aggregation.
+
+\end{itemize}
+
+% =============================================================
+%  II. RELATED WORK
+% =============================================================
+\section{Related Work}
+
+\subsection{Catastrophic Forgetting and Continual Learning}
+
+The problem of neural networks forgetting earlier tasks when
+trained on new ones was formally documented by McCloskey and
+Cohen~\cite{mccloskey1989}. For years it was treated more as
+a quirky footnote than a major engineering concern. As people
+started building larger sequential learning systems, the need
+to actually fix it grew.
+
+Kirkpatrick et al.~\cite{kirkpatrick2017} introduced EWC,
+which uses the Fisher Information Matrix to identify parameters
+that were most important for previous tasks and adds a
+quadratic penalty to resist changing them. The intuition is
+clean: not all parameters matter equally, so protect the ones
+that do. Later work extended this to an online
+variant~\cite{schwarz2018} that does not require storing
+separate Fisher estimates per task, and to structured Kronecker
+approximations~\cite{ritter2018} that handle correlated
+parameters more carefully than the diagonal version does.
+
+A different family of methods keeps a buffer of past samples
+and replays them during future training. Lopez-Paz and
+Ranzato~\cite{lopezpaz2017} framed this with explicit gradient
+constraints to prevent interference. Rolnick et
+al.~\cite{rolnick2019} showed that plain replay --- no fancy
+constraints, just mix in old samples --- performs surprisingly
+well across a range of benchmarks. Parisi et
+al.~\cite{parisi2019} provide a thorough survey, splitting the
+field into regularisation-based, architecture-based, and
+replay-based approaches.
+
+\subsection{Semantic User Modelling}
+
+Collaborative filtering~\cite{koren2009} builds user
+representations from interaction patterns. The resulting
+vectors are good at predicting what a user will click on but
+carry no semantic information about what the user actually
+knows or cares about. Content-based methods fix this but
+traditionally required hand-crafted feature pipelines.
+
+The transformer revolution changed the picture considerably.
+BERT~\cite{devlin2019} showed that dense semantic
+representations could be learned from raw text without
+task-specific labels. Reimers and
+Gurevych~\cite{reimers2019} adapted that architecture into
+Sentence-BERT, optimised specifically to produce sentence
+embeddings useful for similarity tasks. Distilled descendants
+like all-MiniLM-L6-v2~\cite{wang2020} compressed the model
+enough to run comfortably on a CPU while preserving most of
+the semantic quality --- which is what made them practical
+for this work.
+
+\subsection{Dynamic User Models}
+
+Session-based recommendation~\cite{hidasi2016} models
+short-window interaction sequences. Knowledge
+tracing~\cite{piech2015} estimates which concepts a student
+has mastered, but it requires explicit correctness signals
+that are not available in general learning interest data.
+
+The gap this paper addresses is longer-horizon semantic
+evolution driven purely by topic keywords, without interaction
+counts, session boundaries, or correctness labels. Applying
+continual learning update algorithms directly to this setting
+has not, to our knowledge, been studied in prior work.
+
+% =============================================================
+%  III. SYSTEM ARCHITECTURE
+% =============================================================
+\section{System Architecture}
+
+The system is built as four independent layers connected in a
+straight pipeline. Each layer takes one kind of input and
+produces one kind of output, and none of them needs to know
+anything about the internals of its neighbours. Swapping the
+embedding model in Layer~2 does not touch a single line of the
+continual learning code in Layer~3 --- the two layers
+communicate only through a NumPy array.
+
+\subsection{Layer 1 --- Synthetic Timeline Generation}
+
+No publicly available longitudinal dataset records individual
+learning interest trajectories at keyword resolution, so the
+dataset was generated synthetically with controlled properties.
+
+At the heart of the generator is a \texttt{TOPIC\_GRAPH}: a
+dictionary mapping five learning personas --- machine learning
+(\texttt{ml}), robotics, web development (\texttt{web}), data
+science, and cybersecurity (\texttt{security}) --- to one or
+more ordered topic progressions. Each progression is a list
+of 8--10 technical keywords moving from foundational to
+advanced. The \texttt{ml} persona has three separate paths:
+one ending in large language model topics, one in MLOps, and
+one in computer vision. Users within the same persona are
+similar but not identical, because they can follow different
+paths.
+
+A timeline is built by sliding a window of width $w = 3$
+along the selected progression at one step per timestep:
+
+\begin{equation}
+  \mathcal{T}(u,\,t)
+  \;=\;
+  P\bigl[\,t \;:\; t + w\,\bigr]
+  \label{eq:window}
+\end{equation}
+
+The one-step slide creates a two-topic overlap between
+consecutive timesteps, so a user who held topics
+$\{A, B, C\}$ at step $t$ holds $\{B, C, D\}$ at step
+$t{+}1$. That overlap is what keeps the drift gradual rather
+than abrupt. An earlier version of the generator used a step
+size of two, which caused the window to overshoot the end of
+shorter progressions and wrap back, producing identical topic
+sets at steps three and four. Reducing the step to one
+eliminated the problem entirely.
+
+Cross-domain noise is added with probability $p_n = 0.10$
+per timestep: one beginner-level keyword from a different
+persona is appended to the current step, modelling the
+occasional off-topic curiosity that real learners show. The
+50 users are assigned to personas in round-robin order (ten
+per persona) and the whole generation process is seeded at
+42 for reproducibility.
+
+\subsection{Layer 2 --- Semantic Embedding}
+
+Before encoding, the keywords in each timestep's topic list
+are sorted alphabetically and joined into a
+space-separated sentence. Sorting matters because transformer
+models are sensitive to word order, and the order of topics
+within a timestep carries no information about a user's
+interests --- it is an artefact of how the generator stacked
+them. Without sorting, the same three topics in two different
+orders can produce vectors separated by a non-trivial cosine
+distance, injecting noise into the forgetting measurements
+downstream.
+
+The sorted sentence is passed to
+\texttt{all-MiniLM-L6-v2}, a six-layer transformer distilled
+from a larger teacher model, producing a 384-dimensional
+vector normalised to unit length. No part of the model is
+fine-tuned; it functions purely as a frozen feature extractor.
+Because all output vectors are unit vectors, cosine similarity
+between any two of them is just their dot product --- no
+division required.
+
+All 250 embeddings ($50\text{ users} \times 5\text{
+timesteps}$) are collected into a master array of shape
+$(N, T, D) = (50, 5, 384)$ and saved as a NumPy binary file.
+Before any update strategy runs, the $t{=}0$ embedding of
+every user is saved separately as an immutable snapshot.
+These snapshots are the forgetting reference throughout all
+experiments and are never modified.
+
+\subsection{Layer 3 --- Continual Learning Strategies}
+
+\textbf{Forgetting metric.}\enspace
+After every update step, the degree of forgetting for user
+$u$ at timestep $t$ is:
+
+\begin{equation}
+  \Fc(u,\,t)
+  \;=\;
+  1 \;-\; \eb_{u,t}^{\top}\,\eb_{u,0}
+  \label{eq:forgetting}
+\end{equation}
+
+where $\eb_{u,t}$ is the embedding after the update and
+$\eb_{u,0}$ is the frozen initial snapshot. Both are unit
+vectors, so the dot product is the cosine similarity. A score
+of zero means nothing has changed; a score near one means the
+embedding has moved about as far from its starting point as
+it can. The mean across users,
+$\overline{\Fc}(t) = N^{-1}\sum_u \Fc(u,t)$, gives one
+point on the forgetting curve at each timestep.
+
+\subsubsection{Baseline --- Sequential Overwrite}
+
+The baseline replaces the current embedding with the new one,
+unconditionally:
+
+\begin{equation}
+  \eb_{u,t} \;\leftarrow\; \eb_{\mathrm{new}}
+  \label{eq:baseline}
+\end{equation}
+
+Every bit of historical information is discarded at every
+step. This is the worst case for catastrophic forgetting and
+serves as the control condition that EWC and replay are
+measured against.
+
+\subsubsection{Elastic Weight Consolidation}
+
+EWC asks which of the 384 dimensions mattered most to the
+previous embedding and applies resistance proportional to
+that importance. The diagonal of the Fisher Information Matrix
+is approximated by squaring the current embedding values ---
+dimensions with large absolute values are assumed to carry
+stronger signal and are therefore protected more aggressively:
+
+\begin{equation}
+  F_i
+  \;=\;
+  \bigl(\eb_{u,t-1,\,i}\bigr)^{2}
+  \label{eq:fisher}
+\end{equation}
+
+The update for each dimension $i$ is then a weighted
+interpolation between the old and new values:
+
+\begin{equation}
+  \eb_{u,t,\,i}
+  \;=\;
+  \frac{%
+    \eb_{\mathrm{new},\,i}
+    \;+\; \lam\,F_i\;\eb_{u,t-1,\,i}
+  }{%
+    1 \;+\; \lam\,F_i
+  }
+  \label{eq:ewc}
+\end{equation}
+
+The result is re-normalised to unit length. The
+regularisation strength $\lam$ controls the trade-off: a
+small value lets the embedding adapt quickly but forgets
+more; a large value holds the old representation tightly but
+adapts slowly. We test
+$\lam \in \{0.1,\, 0.5,\, 1.0,\, 5.0\}$ and select the
+value that minimises mean forgetting at the final step.
+
+\subsubsection{Experience Replay}
+
+The replay strategy sidesteps the importance-weight
+calculation entirely. It keeps a first-in-first-out buffer
+$\mathcal{B}_u$ of recent embeddings for each user, with
+capacity $k$. Before every update, the current embedding is
+pushed into the buffer (the oldest entry is evicted if the
+buffer is full). The new embedding is then blended with the
+buffer mean:
+
+\begin{equation}
+  \eb_{u,t}
+  \;=\;
+  (1 - \alph)\;\eb_{\mathrm{new}}
+  \;+\;
+  \frac{\alph}{|\mathcal{B}_u|}
+  \sum_{\mathbf{b}\,\in\,\mathcal{B}_u} \mathbf{b}
+  \label{eq:replay}
+\end{equation}
+
+followed by re-normalisation. The mixing ratio $\alph$
+determines how strongly the memory influences each update.
+Algorithm~\ref{alg:replay} gives the full procedure. We
+evaluate $k \in \{1,\,2,\,3\}$ and
+$\alph \in \{0.2,\,0.3,\,0.5\}$.
+
+\begin{algorithm}[t]
+  \caption{Experience Replay Embedding Update}
+  \label{alg:replay}
+  \begin{algorithmic}[1]
+    \REQUIRE
+      $\eb_{\mathrm{old}}$,\ $\eb_{\mathrm{new}}$,\
+      buffer $\mathcal{B}$,\ capacity $k$,\ ratio $\alph$
+    \STATE Push $\eb_{\mathrm{old}}$ onto $\mathcal{B}$
+    \IF{$|\mathcal{B}| > k$}
+      \STATE Evict oldest entry from $\mathcal{B}$
+    \ENDIF
+    \STATE
+      $\mathbf{m}
+      \,\leftarrow\,
+      |\mathcal{B}|^{-1}
+      \sum_{\mathbf{b}\,\in\,\mathcal{B}} \mathbf{b}$
+    \STATE
+      $\eb
+      \,\leftarrow\,
+      (1-\alph)\,\eb_{\mathrm{new}}
+      + \alph\,\mathbf{m}$
+    \RETURN $\eb\;/\;\|\eb\|_{2}$
+  \end{algorithmic}
+\end{algorithm}
+
+\subsection{Layer 4 --- Social Embedding Space}
+
+The final layer exposes three capabilities over the full user
+population.
+
+\textbf{Trajectory visualisation.}\enspace
+All 250 embeddings are stacked into one matrix and reduced
+jointly --- first by PCA to 50 dimensions, then by
+UMAP~\cite{mcinnes2018} to two (\texttt{n\_neighbors}\,=\,8,
+\texttt{min\_dist}\,=\,0.2, cosine metric). Projecting every
+timestep together places them in a single shared coordinate
+system, so an arrow drawn from user $u$'s $t{=}0$ position
+to their $t{=}4$ position is a geometrically honest
+representation of how far and in which direction they drifted.
+
+\textbf{Pairwise similarity.}\enspace
+The full $N \times N$ cosine similarity matrix is computed
+as $\mathbf{S} = \mathbf{E}\mathbf{E}^{\top}$, where each
+row of $\mathbf{E}$ is a unit-normalised user embedding.
+Cluster quality is quantified with the silhouette
+score~\cite{rousseeuw1987} under cosine distance.
+
+\textbf{Next-topic prediction.}\enspace
+For a query user, the $k$ nearest neighbours are retrieved
+from $\mathbf{S}$. Topics appearing in those neighbours'
+subsequent timesteps are frequency-counted, and the most
+common topics the query user has not yet encountered are
+returned as recommendations.
+
+% =============================================================
+%  IV. EXPERIMENTAL SETUP
+% =============================================================
+\section{Experimental Setup}
+
+\subsection{Dataset}
+
+The 50-user synthetic dataset contains ten users per persona,
+each with five timesteps of three topics. Every experiment
+uses \texttt{seed\,=\,42}; the generation code and the
+resulting JSON file are included in the repository.
+
+\subsection{Embedding Model}
+
+All embeddings come from \texttt{all-MiniLM-L6-v2} via the
+\texttt{sentence-transformers} library (version~4.1.0). The
+model has six transformer layers and produces 384-dimensional
+output. Inference ran entirely on CPU; encoding all 250
+sentences takes roughly two seconds on a standard laptop.
+No gradients were computed or applied to the model at any
+point during the experiments.
+
+\subsection{Evaluation}
+
+The primary output is the mean forgetting curve
+$\overline{\Fc}(t)$ for each strategy over
+$t \in \{1,2,3,4\}$, anchored at
+$\overline{\Fc}(0) = 0$ by definition. Secondary outputs
+include per-persona cosine similarity statistics, the overall
+separation ratio, and the silhouette score under cosine
+distance. Table~\ref{tab:hyper} lists every hyperparameter
+and the values tested.
+
+\begin{table}[t]
+  \caption{Hyperparameter Search Space}
+  \label{tab:hyper}
+  \centering
+  \renewcommand{\arraystretch}{1.3}
+  \begin{tabular}{lc}
+    \toprule
+    \textbf{Parameter}             & \textbf{Values tested}       \\
+    \midrule
+    EWC regularisation $\lam$      & $\{0.1,\ 0.5,\ 1.0,\ 5.0\}$ \\
+    Replay capacity $k$            & $\{1,\ 2,\ 3\}$              \\
+    Replay mixing ratio $\alph$    & $\{0.2,\ 0.3,\ 0.5\}$       \\
+    UMAP \texttt{n\_neighbors}     & 8                             \\
+    UMAP \texttt{min\_dist}        & 0.2                           \\
+    Random seed (all experiments)  & 42                            \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+% =============================================================
+%  V. RESULTS
+% =============================================================
+\section{Results}
+
+\subsection{Embedding Space Validation}
+
+Before any continual learning experiment makes sense, the
+embedding space needs to actually encode something meaningful.
+If users from the same domain are no more similar to each
+other than to users from completely different fields, the
+whole exercise falls apart before it starts.
+
+Table~\ref{tab:sim} shows that is not the case. The overall
+separation ratio comes out at $3.32\times$ --- same-domain
+users average $0.734$ similarity while cross-domain pairs
+average $0.221$ --- and this was achieved without a single
+labelled training example. The pre-trained model's existing
+knowledge of technical English is doing all the work.
+Keywords like \textit{ros}, \textit{kinematics}, and
+\textit{path\_planning} already cluster in its representation
+space because they appear together constantly in robotics
+literature.
+
+\begin{table}[t]
+  \caption{Per-Persona Cosine Similarity at $t = 0$}
+  \label{tab:sim}
+  \centering
+  \renewcommand{\arraystretch}{1.3}
+  \begin{tabular}{lccc}
+    \toprule
+    \textbf{Persona}      & \textbf{Intra} & \textbf{Inter}
+                          & \textbf{Separation} \\
+    \midrule
+    \texttt{ml}           & 0.782 & 0.203 & $+0.579$ \\
+    \texttt{robotics}     & 0.765 & 0.199 & $+0.567$ \\
+    \texttt{web}          & 0.891 & 0.034 & $+0.857$ \\
+    \texttt{data science} & 0.744 & 0.288 & $+0.457$ \\
+    \texttt{security}     & 0.711 & 0.200 & $+0.511$ \\
+    \midrule
+    \textbf{Overall}      & \textbf{0.734} & \textbf{0.221}
+                          & $\mathbf{+0.513}$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The web persona stands furthest apart from everything else
+(inter-similarity of just $0.034$). This makes sense: HTML,
+CSS, React, and GraphQL share essentially no vocabulary with
+the Python-heavy terminology of the other four domains. Data
+science and machine learning, by contrast, share enough
+common ground --- \textit{pandas}, \textit{sklearn},
+\textit{statistics} --- that their inter-persona similarity
+is the highest of any pair at around $0.50$.
+
+Figure~\ref{fig:pca} puts this into visual form. The web
+cluster sits cleanly away from the others; robotics and
+machine learning share a region of space but remain
+distinguishable. The pairwise similarity matrix
+(Fig.~\ref{fig:matrix}) makes the block structure explicit:
+bright diagonal squares confirm within-group cohesion, and
+the notably dark row and column for web confirm just how
+semantically isolated it is from the rest.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{figures/fig1_pca_t0.png}
+  \caption{%
+    PCA projection of $t{=}0$ embeddings. Each point is one
+    user; colour encodes persona. Web (green) sits clearly
+    apart. The overlap between machine learning and data
+    science reflects genuine shared vocabulary rather than
+    a flaw in the embedding.%
+  }
+  \label{fig:pca}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{figures/fig3_similarity_matrix.png}
+  \caption{%
+    Pairwise cosine similarity matrix for all 50 users at
+    $t{=}0$, sorted by persona. The five bright diagonal
+    blocks confirm within-group cohesion. The dark row and
+    column for web confirm its semantic isolation from every
+    other domain.%
+  }
+  \label{fig:matrix}
+\end{figure}
+
+\subsection{Baseline Forgetting Measurements}
+
+Table~\ref{tab:drift} shows how far each persona drifts from
+its initial state by $t{=}4$ under plain overwriting. Web
+drifts the most, reaching a mean of $0.958$. The reason is
+the same one that made web so distinct in the similarity
+analysis: the vocabulary gap between beginner and advanced
+topics is steep. A user whose initial topics were
+\textit{html} and \textit{css} ends up at \textit{graphql}
+and \textit{prisma} --- words that barely overlap in the
+model's space even though the user has simply gone deeper
+into web development rather than switching fields. Robotics
+drifts the least ($0.777$), likely because the domain's
+vocabulary --- sensors, control, kinematics, path planning
+--- stays technically consistent from entry level to expert
+level.
+
+\begin{table}[t]
+  \caption{Baseline Forgetting at $t = 4$ by Persona}
+  \label{tab:drift}
+  \centering
+  \renewcommand{\arraystretch}{1.3}
+  \begin{tabular}{lcc}
+    \toprule
+    \textbf{Persona}      & \textbf{Mean $\overline{\Fc}$}
+                          & \textbf{Range}      \\
+    \midrule
+    \texttt{ml}           & 0.850 & $[0.53,\;1.06]$ \\
+    \texttt{robotics}     & 0.777 & $[0.67,\;0.82]$ \\
+    \texttt{web}          & 0.958 & $[0.93,\;1.00]$ \\
+    \texttt{data science} & 0.798 & $[0.57,\;0.91]$ \\
+    \texttt{security}     & 0.881 & $[0.84,\;0.95]$ \\
+    \midrule
+    \textbf{All users}    & \textbf{0.853}
+                          & $[0.53,\;1.06]$     \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Figure~\ref{fig:traj} shows the same pattern spatially.
+Web users converge toward a shared endpoint at the bottom
+of the chart; machine learning arrows are shorter and point
+in different directions depending on which progression path
+each user followed. Figure~\ref{fig:drift} shows the full
+forgetting curve over time. Every persona follows the same
+rough shape: a steep initial jump at $t{=}1$, then a gradual
+flattening as the embedding settles into its new region of
+the space. The steepest early rise belongs to web; the
+shallowest overall trajectory belongs to robotics.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{figures/fig2_trajectories.png}
+  \caption{%
+    User trajectories from $t{=}0$ (faded dot) to $t{=}4$
+    (solid dot) in PCA space. Arrow length corresponds to
+    total semantic drift. Web users (green) converge on a
+    shared advanced-topic cluster. Machine learning arrows
+    are shorter and more dispersed, reflecting multiple
+    available progression paths.%
+  }
+  \label{fig:traj}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{figures/fig4_drift_over_time.png}
+  \caption{%
+    Baseline semantic drift $\overline{\Fc}(t)$ over time.
+    Thin lines are individual users; thick lines are
+    persona-level averages. This curve is the control
+    condition for Phase~2: EWC and replay buffer results
+    will be overlaid on this same chart.%
+  }
+  \label{fig:drift}
+\end{figure}
+
+\subsection{Continual Learning Evaluation (Phase~2)}
+
+The EWC and replay buffer experiments are currently running.
+Given the size of the baseline forgetting signal ($0.853$)
+and the structured nature of the synthetic progressions,
+two success thresholds are defined: a 25\% reduction for EWC
+($\overline{\Fc}_{\mathrm{EWC}} < 0.640$) and 20\% for
+replay ($\overline{\Fc}_{\mathrm{replay}} < 0.682$). These
+are intentionally conservative relative to what EWC achieves
+on structured sequential tasks in the
+literature~\cite{kirkpatrick2017}.
+
+The final comparison figure will overlay all three forgetting
+curves on a single chart. A consistent gap between the
+baseline line and both CL lines across $t \in \{2,3,4\}$,
+supported by paired $t$-tests, will confirm the central claim
+of the paper.
+
+% =============================================================
+%  VI. DISCUSSION
+% =============================================================
+\section{Discussion}
+
+\subsection{What Phase~1 Tells Us}
+
+The $3.32\times$ separation ratio is the most practically
+significant result from Phase~1, and it comes with an
+important qualifier: none of it required labelled data. The
+model was not told that robotics users should cluster
+together. It already knew that \textit{kinematics} and
+\textit{slam} are related concepts, and that \textit{html}
+is not, because it saw those relationships played out across
+a vast amount of technical text during pre-training.
+
+This has a useful implication for deployment. In many real
+systems, user interaction data is sparse or unavailable
+early on --- the cold-start problem. A topic-keyword approach
+built on a general-purpose sentence transformer could provide
+a workable first approximation of user interests without
+requiring any interaction history at all. Whether that
+approximation is accurate enough to be useful in practice is
+an empirical question, but the Phase~1 results suggest it is
+at least worth investigating seriously.
+
+The high baseline drift values (mean $0.853$) also deserve
+a closer look than they might initially receive. Part of that
+number is genuine interest evolution --- a user moving from
+Python basics to large language models really has changed
+significantly. But another part is a measurement artefact.
+When \textit{python} and \textit{numpy} give way to
+\textit{transformers} and \textit{llms}, the cosine distance
+between those keyword sets is large in the model's space even
+though the user has simply gone deeper into machine learning
+rather than leaving it. A model fine-tuned on domain-specific
+text would likely compress that distance, producing lower
+apparent drift for the same actual learning progression.
+That distinction matters when interpreting the Phase~2
+forgetting reductions.
+
+\subsection{Limitations}
+
+The dataset is synthetic, and that is the most significant
+caveat. The sliding-window mechanism produces smooth,
+predictable drift that real learner behaviour almost
+certainly does not exhibit. People revisit old topics,
+abandon subjects for months, and pick up parallel interests
+in unrelated areas. A system built and validated only on
+smooth progressions might handle abrupt jumps poorly. The
+most important next step is testing against a real learning
+log dataset --- even a small one would be informative.
+
+The second limitation is that all keywords are weighted
+equally. A user who has spent three months working through
+every tutorial on a topic and someone who glanced at it once
+produce the same embedding update if their keyword lists look
+the same. Incorporating an engagement signal --- even
+something as simple as dwell time on a page --- would make
+the updates meaningfully more informative.
+
+The third is the diagonal Fisher approximation in EWC. If the
+information encoding a user's core interest is distributed
+across a cluster of correlated dimensions rather than
+concentrated in a few individually large ones, the diagonal
+approximation will underprotect it. Structured
+approximations~\cite{ritter2018} handle this case better,
+though at a higher computational cost.
+
+\subsection{Where This Goes Next}
+
+Once Phase~2 results are in, the natural next question is
+cluster quality: does EWC preserve the within-persona
+grouping better than plain overwriting? If the silhouette
+score under EWC-updated embeddings stays closer to its
+$t{=}0$ value than the baseline silhouette does, that is a
+second piece of evidence that EWC is actually protecting
+meaningful structure rather than just slowing down change.
+The trajectory visualisation will give an intuitive view of
+the same thing: EWC arrows should be shorter on average than
+baseline arrows, and they should point in directions that
+stay within the user's original cluster rather than crossing
+into neighbouring ones.
+
+Beyond Phase~2, the modular design means replacing the
+synthetic dataset with a real one requires changes only in
+Layer~1. Every other layer operates on the same $(N, T, D)$
+array regardless of how the topic lists were obtained. That
+separation was a deliberate choice during implementation, and
+it should make the transition to real data considerably less
+painful.
+
+% =============================================================
+%  VII. CONCLUSION
+% =============================================================
+\section{Conclusion}
+
+This paper set out to answer a practical question: can
+simple, computationally cheap continual learning strategies
+meaningfully reduce catastrophic forgetting in a sequential
+user embedding pipeline? Building the infrastructure to
+answer that question rigorously turned out to be most of the
+work, and that infrastructure is now in place.
+
+Phase~1 established two things. The embedding space built
+from topic keywords and a frozen sentence transformer is
+genuinely well-organised by domain, achieving a $3.32\times$
+same-domain versus cross-domain similarity ratio without any
+supervision. And naive sequential overwriting erases a
+substantial fraction of each user's initial representation
+--- mean drift of $0.853$ after four steps --- providing a
+strong baseline signal for Phase~2 to improve upon.
+
+If EWC and replay buffer each reduce that forgetting by
+20--25\% in the Phase~2 evaluation, the result carries a
+straightforward practical message: you do not need an
+elaborate lifelong learning system to do meaningfully better
+than naive overwriting in this setting. Simple strategies,
+applied consistently and measured carefully, are enough to
+preserve a noticeable portion of each user's identity across
+sequential updates. That is a useful thing to know for anyone
+building systems that need to track how people's interests
+evolve over time.
+
+% =============================================================
+%  REFERENCES  ---  new page, single column
+% =============================================================
+\newpage
+\onecolumn
+
+\section*{References}
+
+\vspace{4pt}
+
+\begin{thebibliography}{15}
+
+\bibitem{kirkpatrick2017}
+J.~Kirkpatrick, R.~Pascanu, N.~Rabinowitz, J.~Veness,
+G.~Desjardins, A.~A.~Rusu, K.~Milan, J.~Quan, T.~Ramalho,
+A.~Grabska-Barwinska, D.~Hassabis, C.~Clopath, D.~Kumaran,
+and R.~Hadsell,
+``Overcoming catastrophic forgetting in neural networks,''
+\textit{Proceedings of the National Academy of Sciences},
+vol.~114, no.~13, pp.~3521--3526, 2017.
+
+\bibitem{rolnick2019}
+D.~Rolnick, A.~Ahuja, J.~Schwarz, T.~P.~Lillicrap,
+and G.~Wayne,
+``Experience replay for continual learning,''
+in \textit{Advances in Neural Information Processing Systems
+(NeurIPS)}, 2019.
+
+\bibitem{mccloskey1989}
+M.~McCloskey and N.~J.~Cohen,
+``Catastrophic interference in connectionist networks:
+The sequential learning problem,''
+\textit{Psychology of Learning and Motivation},
+vol.~24, pp.~109--165, 1989.
+
+\bibitem{lopezpaz2017}
+D.~Lopez-Paz and M.~Ranzato,
+``Gradient episodic memory for continual learning,''
+in \textit{Advances in Neural Information Processing Systems
+(NeurIPS)}, 2017.
+
+\bibitem{parisi2019}
+G.~I.~Parisi, R.~Kemker, J.~L.~Part, C.~Kanan,
+and S.~Wermter,
+``Continual lifelong learning with neural networks:
+A review,''
+\textit{Neural Networks}, vol.~113, pp.~54--71, 2019.
+
+\bibitem{schwarz2018}
+J.~Schwarz, J.~Luketina, W.~M.~Czarnecki, A.~Grabska-Barwinska,
+Y.~W.~Teh, R.~Pascanu, and R.~Hadsell,
+``Progress \& compress: A scalable framework for continual
+learning,''
+in \textit{Proceedings of the International Conference on
+Machine Learning (ICML)}, 2018.
+
+\bibitem{ritter2018}
+H.~Ritter, A.~Botev, and D.~Barber,
+``Online structured Laplace approximations for overcoming
+catastrophic forgetting,''
+in \textit{Advances in Neural Information Processing Systems
+(NeurIPS)}, 2018.
+
+\bibitem{koren2009}
+Y.~Koren, R.~Bell, and C.~Volinsky,
+``Matrix factorization techniques for recommender systems,''
+\textit{Computer}, vol.~42, no.~8, pp.~30--37, 2009.
+
+\bibitem{devlin2019}
+J.~Devlin, M.-W.~Chang, K.~Lee, and K.~Toutanova,
+``BERT: Pre-training of deep bidirectional transformers for
+language understanding,''
+in \textit{Proceedings of NAACL-HLT}, 2019.
+
+\bibitem{reimers2019}
+N.~Reimers and I.~Gurevych,
+``Sentence-BERT: Sentence embeddings using Siamese
+BERT-networks,''
+in \textit{Proceedings of EMNLP-IJCNLP}, 2019.
+
+\bibitem{wang2020}
+W.~Wang, F.~Wei, L.~Dong, H.~Bao, N.~Yang,
+and M.~Zhou,
+``MiniLM: Deep self-attention distillation for task-agnostic
+compression of pre-trained transformers,''
+in \textit{Advances in Neural Information Processing Systems
+(NeurIPS)}, 2020.
+
+\bibitem{hidasi2016}
+B.~Hidasi, A.~Karatzoglou, L.~Baltrunas, and D.~Tikk,
+``Session-based recommendations with recurrent neural
+networks,''
+in \textit{Proceedings of the International Conference on
+Learning Representations (ICLR)}, 2016.
+
+\bibitem{piech2015}
+C.~Piech, J.~Bassen, J.~Huang, S.~Ganguli, M.~Sahami,
+L.~J.~Guibas, and J.~Sohl-Dickstein,
+``Deep knowledge tracing,''
+in \textit{Advances in Neural Information Processing Systems
+(NeurIPS)}, 2015.
+
+\bibitem{mcinnes2018}
+L.~McInnes, J.~Healy, and J.~Melville,
+``UMAP: Uniform manifold approximation and projection for
+dimension reduction,''
+\textit{arXiv preprint arXiv:1802.03426}, 2018.
+
+\bibitem{rousseeuw1987}
+P.~J.~Rousseeuw,
+``Silhouettes: A graphical aid to the interpretation and
+validation of cluster analysis,''
+\textit{Journal of Computational and Applied Mathematics},
+vol.~20, pp.~53--65, 1987.
+
+\end{thebibliography}
+
+\end{document}

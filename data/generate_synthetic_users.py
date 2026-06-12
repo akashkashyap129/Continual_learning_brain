@@ -7,12 +7,12 @@ import random
 import numpy as np
 from pathlib import Path
 
-# ── output path 
+                                                                                                                                        # ── output path 
 OUTPUT_PATH = Path("data/raw/synthetic_users.json")
 
-# ── topic graph 
-# Each persona has one or more progression paths.
-# Topics overlap between adjacent steps to create smooth drift.
+                                                                                                                                                                # ── topic graph 
+                                                                                                                                                                # Each persona has one or more progression paths.
+                                                                                                                                                                # Topics overlap between adjacent steps to create smooth drift.
 TOPIC_GRAPH = {
     "ml": {
         "progressions": [
@@ -32,7 +32,7 @@ TOPIC_GRAPH = {
              "actuators", "pid_control", "ros", "robot_vision"],
         ]
     },
-    "web": {
+    "web": {    
         "progressions": [
             ["html", "css", "javascript", "dom_manipulation",
              "react", "nodejs", "rest_apis", "databases", "devops", "cloud"],

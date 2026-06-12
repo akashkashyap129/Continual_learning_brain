@@ -13,7 +13,7 @@ EMBEDDINGS_DIR = Path("embeddings/store")
 SNAPSHOTS_DIR  = Path("embeddings/store/snapshots")
 MASTER_PATH    = Path("embeddings/store/all_embeddings.npy")
 META_PATH      = Path("embeddings/store/meta.json")
-MODEL_NAME      = "all-MiniLM-L6-v2"
+MODEL_NAME      = "all-MiniLM-L6-v2"   
 EMBED_DIM       = 384
 
 
